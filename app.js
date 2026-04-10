@@ -94,6 +94,11 @@ function initMap() {
     ).addTo(map);
 
     treeLayer = L.layerGroup().addTo(map);
+
+    // Recalculate tile grid after fonts/CSS finish shifting the layout.
+    // Without this, tiles only render in part of the container on first load.
+    setTimeout(() => map.invalidateSize(), 300);
+    window.addEventListener('resize', () => map.invalidateSize());
 }
 
 // ─── Main Flow ────────────────────────────────────────────────────────────────
