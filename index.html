@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sakura Tree Finder</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=VT323&family=Cinzel:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/avif" href="sakura.avif" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+    <div id="page-wrapper">
+
+        <!-- Header -->
+        <header id="main-header">
+            <div class="petal-row" aria-hidden="true">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+            <div id="header-inner">
+                <div id="header-logo">&#10047;</div>
+                <div id="header-text">
+                    <h1>SAKURA TREE FINDER</h1>
+                    <h2>&#8765; Locate the Nearest Cherry Blossom &#8765;</h2>
+                    <div id="header-subtitle">Find a cherry blossom tree near you</div>
+                </div>
+                <div id="header-logo">&#10047;</div>
+            </div>
+            <div class="petal-row" aria-hidden="true">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+        </header>
+
+        <!-- Body Layout -->
+        <div id="body-layout">
+
+            <!-- Main Content -->
+            <main id="main-content">
+
+                <!-- Finder Section -->
+                <section id="finder-section" class="retro-box">
+                    <div class="box-title">&#10047; FIND YOUR NEAREST SAKURA TREE &#10047;</div>
+
+                    <div id="finder-intro">
+                        <p>
+                            Hit the button below and we'll use your device's location to find
+                            the closest Sakura tree near you. Your browser may ask permission
+                            to share your location, just click <strong>Allow</strong>.
+                        </p>
+                    </div>
+
+                    <div id="button-area">
+                        <button id="locate-btn" class="retro-btn">
+                            &#9733; LOCATE NEAREST SAKURA &#9733;
+                        </button>
+                        <button id="reset-btn" class="retro-btn secondary hidden">
+                            &#8635; SEARCH AGAIN
+                        </button>
+                    </div>
+
+                    <div id="status-area">
+                        <div id="status-bar">
+                            <span class="status-label">STATUS:</span>
+                            <span id="status-text">Awaiting location request...</span>
+                        </div>
+                        <div id="progress-bar" class="hidden">
+                            <div id="progress-fill"></div>
+                        </div>
+                        <div id="geo-error-help" class="hidden">
+                            <div class="geo-error-title">&#9888; How to enable location access:</div>
+                            <ul>
+                                <li><strong>Chrome / Edge:</strong> Click the lock icon in the address bar &rarr; Site settings &rarr; Location &rarr; Allow</li>
+                                <li><strong>Firefox:</strong> Click the lock icon &rarr; Connection secure &rarr; More information &rarr; Permissions &rarr; Access your location &rarr; Allow</li>
+                                <li><strong>Safari:</strong> Safari menu &rarr; Settings for This Website &rarr; Location &rarr; Allow</li>
+                            </ul>
+                            <p>After changing the setting, reload this page and try again.</p>
+                        </div>
+                    </div>
+
+                    <!-- Result Box -->
+                    <div id="result-box" class="hidden">
+                        <div class="inner-box-title">&#10047; NEAREST SAKURA FOUND! &#10047;</div>
+                        <table id="result-table">
+                            <tr>
+                                <th>Name / ID:</th>
+                                <td id="r-name">&#8212;</td>
+                            </tr>
+                            <tr>
+                                <th>Species:</th>
+                                <td id="r-species">&#8212;</td>
+                            </tr>
+                            <tr>
+                                <th>Distance:</th>
+                                <td id="r-distance">&#8212;</td>
+                            </tr>
+                            <tr>
+                                <th>Coordinates:</th>
+                                <td id="r-coords">&#8212;</td>
+                            </tr>
+                            <tr>
+                                <th>Bearing:</th>
+                                <td id="r-bearing">&#8212;</td>
+                            </tr>
+                        </table>
+                        <div id="directions-area">
+                            <a id="directions-link" href="#" target="_blank" class="retro-btn small">
+                                &#9654; Open in Maps
+                            </a>
+                        </div>
+                        <div id="no-results" class="hidden">
+                            <p>&#9888; No Sakura trees found within 50km of your location.</p>
+                            <p>Consider contributing to <a href="https://www.openstreetmap.org" target="_blank">OpenStreetMap</a> if you know of trees in your area!</p>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="section-divider">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+
+                <!-- Map Section -->
+                <section id="map-section" class="retro-box">
+                    <div class="box-title">&#10047; INTERACTIVE SAKURA MAP &#10047;</div>
+                    <p class="map-desc">
+                        Pink dots are Sakura trees. The blue dot is you. Zoom in to explore your area.
+                    </p>
+                    <div id="map-frame">
+                        <div id="map"></div>
+                    </div>
+                    <div id="map-legend">
+                        <div class="legend-title">MAP LEGEND</div>
+                        <div class="legend-items">
+                            <span class="legend-item">
+                                <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="#ff69b4" stroke="#c2185b" stroke-width="2"/></svg>
+                                Sakura Tree
+                            </span>
+                            <span class="legend-item">
+                                <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="#4a90d9" stroke="#1a5fa8" stroke-width="2"/></svg>
+                                Your Location
+                            </span>
+                            <span class="legend-item" id="tree-count-legend">
+                                Trees shown: <span id="tree-count">0</span>
+                            </span>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="section-divider">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+
+                <!-- About Section -->
+                <section id="about-section" class="retro-box">
+                    <div class="box-title">&#10047; ABOUT SAKURA TREES &#10047;</div>
+                    <div id="about-content">
+                        <p>
+                            There is nothing quite like standing under a Sakura tree in full bloom.
+                            The petals come down like snow, everything smells faintly sweet, and for
+                            a couple of weeks a year the whole world feels a little softer. That's
+                            what this site is about.
+                        </p>
+                        <p>
+                            In Japan they call it <strong>Hanami</strong>, which just means "flower viewing."
+                            People pack lunches, spread out blankets under the trees, and sit there for hours.
+                            It's been going on for over a thousand years. The idea is that the blossoms are
+                            beautiful <em>because</em> they don't last. Two weeks and they're gone.
+                        </p>
+                        <p>
+                            These are the varieties you're most likely to come across:
+                        </p>
+                        <table class="species-table">
+                            <thead>
+                                <tr>
+                                    <th>Species</th>
+                                    <th>Common Name</th>
+                                    <th>Bloom Period</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td><em>Prunus serrulata</em></td><td>Japanese Cherry</td><td>Late March &ndash; April</td></tr>
+                                <tr><td><em>Prunus &times; yedoensis</em></td><td>Yoshino Cherry</td><td>Late March &ndash; April</td></tr>
+                                <tr><td><em>Prunus subhirtella</em></td><td>Higan Cherry</td><td>March &ndash; April</td></tr>
+                                <tr><td><em>Prunus pendula</em></td><td>Weeping Cherry</td><td>March &ndash; April</td></tr>
+                                <tr><td><em>Prunus sargentii</em></td><td>Sargent Cherry</td><td>April &ndash; May</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+
+            </main>
+        </div>
+
+        <!-- Footer -->
+        <footer id="main-footer">
+            <div class="petal-row" aria-hidden="true">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+            <div id="footer-content">
+                <div id="footer-text">
+                    <div>&copy; 2026 Sakura Tree Finder</div>
+                    <div>Data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap contributors</a>, ODbL | <a href="https://leafletjs.com" target="_blank">Leaflet.js</a> | Open Source</div>
+                    <div id="webmaster-link">Questions? Email the <a href="mailto:hunterweisenbach@me.com">Webmaster</a></div>
+                </div>
+            </div>
+            <div class="petal-row" aria-hidden="true">&#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047; &#10048; &#10047;</div>
+        </footer>
+
+    </div><!-- end page-wrapper -->
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
