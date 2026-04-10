@@ -95,9 +95,18 @@ function initMap() {
 
     treeLayer = L.layerGroup().addTo(map);
 
-    // Recalculate tile grid after fonts/CSS finish shifting the layout.
-    // Without this, tiles only render in part of the container on first load.
-    setTimeout(() => map.invalidateSize(), 300);
+    // Recalculate tile grid after all fonts have loaded and layout is stable.
+    // A fixed setTimeout isn't reliable on CDN — fonts can load slower than the
+    // arbitrary delay, leaving Leaflet with a stale container measurement.
+    document.fonts.ready.then(() => map.invalidateSize());
+
+    // Re-measure whenever the map section scrolls into view, in case the user
+    // reaches the map after fonts have already settled but before a resize fired.
+    const observer = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) map.invalidateSize();
+    }, { threshold: 0.1 });
+    observer.observe(document.getElementById('map'));
+
     window.addEventListener('resize', () => map.invalidateSize());
 }
 
