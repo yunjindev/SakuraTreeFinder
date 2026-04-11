@@ -1,11 +1,9 @@
 /**
  * Sakura Tree Finder :: app.js
  *
- * - Initializes a Leaflet map with CartoDB Voyager tiles
- * - Uses browser Geolocation API to get user position
- * - Queries Overpass API for nearby cherry blossom trees
- * - Finds and highlights the nearest one
- * - Renders pink dot markers for all results
+ * Map: MapLibre GL JS (WebGL canvas — no tile-grid desync issues)
+ * Tiles: OpenFreeMap liberty style (free, no API key)
+ * Trees: Overpass API queried live on geolocation
  */
 
 'use strict';
@@ -13,17 +11,14 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const OVERPASS_URL         = 'https://overpass-api.de/api/interpreter';
-const OVERPASS_TIMEOUT_MS  = 20000;  // abort a single attempt after 20s
-const OVERPASS_MAX_RETRIES = 3;      // total attempts before giving up
+const OVERPASS_TIMEOUT_MS  = 20000;
+const OVERPASS_MAX_RETRIES = 3;
+const SEARCH_RADIUS        = 50000;
 
-// Search radius in meters
-const SEARCH_RADIUS = 50000;
-
-// Default map center (Tokyo — spiritual home of the sakura)
-const DEFAULT_CENTER = [35.6762, 139.6503];
+// MapLibre uses [lon, lat] order (GeoJSON standard)
+const DEFAULT_CENTER = [139.6503, 35.6762]; // Tokyo
 const DEFAULT_ZOOM   = 5;
 
-// Statuses displayed in the terminal-style status bar
 const STATUS = {
     IDLE:        'Awaiting location request...',
     LOCATING:    'Acquiring GPS coordinates...',
@@ -37,12 +32,13 @@ const STATUS = {
     ERR_API:     'Overpass API unavailable after 3 attempts. Try again later.',
 };
 
-// ─── Module State ─────────────────────────────────────────────────────────────
+// ─── State ────────────────────────────────────────────────────────────────────
 
-let map          = null;   // Leaflet map instance
-let userMarker   = null;   // User location marker
-let treeLayer    = null;   // LayerGroup for tree markers
-let userLatLng   = null;   // { lat, lon }
+let map         = null;
+let userMarker  = null;
+let activePopup = null;
+let mapReady    = false;
+let userLatLng  = null;
 
 // ─── DOM References ───────────────────────────────────────────────────────────
 
@@ -57,7 +53,6 @@ const directionsArea = document.getElementById('directions-area');
 const treeCountEl    = document.getElementById('tree-count');
 const geoErrorHelp   = document.getElementById('geo-error-help');
 
-// Result fields
 const rName     = document.getElementById('r-name');
 const rSpecies  = document.getElementById('r-species');
 const rDistance = document.getElementById('r-distance');
@@ -72,49 +67,113 @@ document.addEventListener('DOMContentLoaded', () => {
     resetBtn.addEventListener('click', onReset);
 });
 
-// ─── Map Initialization ───────────────────────────────────────────────────────
+// ─── Map ──────────────────────────────────────────────────────────────────────
 
 function initMap() {
-    map = L.map('map', {
+    map = new maplibregl.Map({
+        container: 'map',
+        style: 'https://tiles.openfreemap.org/styles/liberty',
         center: DEFAULT_CENTER,
-        zoom:   DEFAULT_ZOOM,
-        zoomControl: true,
+        zoom: DEFAULT_ZOOM,
         attributionControl: true,
     });
 
-    // CartoDB Voyager — clean, slightly vintage look, free, no API key
-    L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-        {
-            attribution:
-                '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
-            subdomains: 'abcd',
-            maxZoom: 19,
-        }
-    ).addTo(map);
+    map.on('load', () => {
+        mapReady = true;
 
-    treeLayer = L.layerGroup().addTo(map);
+        // GeoJSON source — all tree dots live here
+        map.addSource('trees', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+        });
 
-    // Recalculate tile grid after all fonts have loaded and layout is stable.
-    // A fixed setTimeout isn't reliable on CDN — fonts can load slower than the
-    // arbitrary delay, leaving Leaflet with a stale container measurement.
-    document.fonts.ready.then(() => map.invalidateSize());
+        // Pink circle layer — rendered in WebGL, handles thousands of points
+        map.addLayer({
+            id: 'tree-circles',
+            type: 'circle',
+            source: 'trees',
+            paint: {
+                'circle-radius': 6,
+                'circle-color': '#ff69b4',
+                'circle-stroke-color': '#c2185b',
+                'circle-stroke-width': 2,
+                'circle-opacity': 0.9,
+            }
+        });
 
-    // Re-measure whenever the map section scrolls into view, in case the user
-    // reaches the map after fonts have already settled but before a resize fired.
-    const observer = new IntersectionObserver(entries => {
-        if (entries[0].isIntersecting) map.invalidateSize();
-    }, { threshold: 0.1 });
-    observer.observe(document.getElementById('map'));
+        // Popup on tree click
+        map.on('click', 'tree-circles', e => {
+            const props  = e.features[0].properties;
+            const coords = e.features[0].geometry.coordinates.slice();
+            if (activePopup) activePopup.remove();
+            activePopup = new maplibregl.Popup({ closeButton: true, offset: 8 })
+                .setLngLat(coords)
+                .setHTML(buildPopup(props))
+                .addTo(map);
+        });
 
-    window.addEventListener('resize', () => map.invalidateSize());
+        map.on('mouseenter', 'tree-circles', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'tree-circles', () => { map.getCanvas().style.cursor = ''; });
+    });
+}
+
+function renderTrees(trees) {
+    const geojson = {
+        type: 'FeatureCollection',
+        features: trees.map(tree => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [tree.lon, tree.lat] },
+            properties: {
+                id:      tree.id,
+                lat:     tree.lat,
+                lon:     tree.lon,
+                name:    tree.tags?.name    || tree.tags?.['name:en']    || '',
+                species: tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || '',
+                height:  tree.tags?.height  || '',
+            }
+        }))
+    };
+
+    if (mapReady) map.getSource('trees').setData(geojson);
+    treeCountEl.textContent = trees.length.toLocaleString();
+}
+
+function placeUserMarker(lat, lon) {
+    if (userMarker) userMarker.remove();
+
+    const el = document.createElement('div');
+    el.className = 'user-dot';
+
+    userMarker = new maplibregl.Marker({ element: el })
+        .setLngLat([lon, lat])
+        .setPopup(new maplibregl.Popup({ offset: 10 })
+            .setHTML('<div class="popup-title">Your Location</div>'))
+        .addTo(map);
+}
+
+function buildPopup(props) {
+    const name    = props.name    || ('Cherry Blossom Tree #' + props.id);
+    const species = props.species || 'Prunus sp.';
+    const lat     = typeof props.lat === 'number' ? props.lat : parseFloat(props.lat);
+    const lon     = typeof props.lon === 'number' ? props.lon : parseFloat(props.lon);
+    const height  = props.height
+        ? `<div class="popup-row"><span class="popup-label">Height:</span> ${escapeHtml(String(props.height))}m</div>`
+        : '';
+
+    return `
+        <div class="popup-title">&#10047; ${escapeHtml(name)}</div>
+        <div class="popup-row"><span class="popup-label">Species:</span> <em>${escapeHtml(species)}</em></div>
+        ${height}
+        <div class="popup-row"><span class="popup-label">Coords:</span> ${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
+        <div class="popup-row"><a href="https://www.openstreetmap.org/node/${props.id}" target="_blank" style="font-size:11px">View on OSM &#8594;</a></div>
+    `;
 }
 
 // ─── Main Flow ────────────────────────────────────────────────────────────────
 
 function onLocateClick() {
     if (!navigator.geolocation) {
-        setStatus(STATUS.ERR_GEO);
+        setStatus(STATUS.ERR_UNAVAIL);
         return;
     }
 
@@ -143,9 +202,9 @@ function onReset() {
     setStatus(STATUS.IDLE);
     setProgress(0);
 
-    // Remove user marker & tree markers
-    if (userMarker) { map.removeLayer(userMarker); userMarker = null; }
-    treeLayer.clearLayers();
+    if (userMarker)  { userMarker.remove();  userMarker  = null; }
+    if (activePopup) { activePopup.remove(); activePopup = null; }
+    if (mapReady) map.getSource('trees').setData({ type: 'FeatureCollection', features: [] });
     treeCountEl.textContent = '0';
     userLatLng = null;
 }
@@ -154,9 +213,9 @@ async function onLocationSuccess(position) {
     const { latitude: lat, longitude: lon } = position.coords;
     userLatLng = { lat, lon };
 
-    // Place user marker
     placeUserMarker(lat, lon);
-    map.setView([lat, lon], 13);
+    map.setCenter([lon, lat]);
+    map.setZoom(13);
 
     setStatus(STATUS.FETCHING);
     setProgress(30);
@@ -199,12 +258,11 @@ function onLocationError(err) {
     } else if (err.code === GeolocationPositionError.POSITION_UNAVAILABLE) {
         setStatus(STATUS.ERR_UNAVAIL);
     } else {
-        // TIMEOUT or unknown
         setStatus(STATUS.ERR_TIMEOUT);
     }
 }
 
-// ─── Overpass API Query ───────────────────────────────────────────────────────
+// ─── Overpass API ─────────────────────────────────────────────────────────────
 
 async function fetchTrees(lat, lon) {
     const query = `
@@ -222,7 +280,7 @@ out body;
 
     for (let attempt = 1; attempt <= OVERPASS_MAX_RETRIES; attempt++) {
         if (attempt > 1) {
-            const delaySec = 2 ** (attempt - 2); // 1s, 2s
+            const delaySec = 2 ** (attempt - 2);
             setStatus(`Overpass API busy. Retrying in ${delaySec}s... (attempt ${attempt}/${OVERPASS_MAX_RETRIES})`);
             await sleep(delaySec * 1000);
             setStatus(STATUS.FETCHING);
@@ -240,11 +298,9 @@ out body;
             });
             clearTimeout(timeoutId);
 
-            // 4xx errors are not transient — don't retry
             if (resp.status >= 400 && resp.status < 500) {
                 throw new Error(`Overpass API returned ${resp.status}. Not retrying.`);
             }
-
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
             const json = await resp.json();
@@ -253,11 +309,7 @@ out body;
         } catch (err) {
             clearTimeout(timeoutId);
             lastError = err;
-
-            // Non-transient: bubble immediately
             if (err.message && err.message.includes('Not retrying')) throw err;
-
-            // Otherwise loop to next attempt
             console.warn(`Overpass attempt ${attempt} failed:`, err.message);
         }
     }
@@ -269,68 +321,15 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ─── Rendering ────────────────────────────────────────────────────────────────
-
-function renderTrees(trees) {
-    treeLayer.clearLayers();
-
-    trees.forEach(tree => {
-        const icon = L.divIcon({
-            className:  'sakura-marker-container',
-            html:       '<div class="sakura-dot"></div>',
-            iconSize:   [10, 10],
-            iconAnchor: [5, 5],
-        });
-
-        const marker = L.marker([tree.lat, tree.lon], { icon });
-        marker.bindPopup(buildPopup(tree));
-        treeLayer.addLayer(marker);
-    });
-
-    treeCountEl.textContent = trees.length.toLocaleString();
-}
-
-function placeUserMarker(lat, lon) {
-    if (userMarker) map.removeLayer(userMarker);
-
-    const icon = L.divIcon({
-        className:  'user-marker-container',
-        html:       '<div class="user-dot"></div>',
-        iconSize:   [14, 14],
-        iconAnchor: [7, 7],
-    });
-
-    userMarker = L.marker([lat, lon], { icon, zIndexOffset: 1000 });
-    userMarker.bindPopup('<div class="popup-title">Your Location</div>');
-    userMarker.addTo(map);
-}
-
-function buildPopup(tree) {
-    const name    = tree.tags?.name || tree.tags?.['name:en'] || 'Cherry Blossom Tree';
-    const species = tree.tags?.species || tree.tags?.taxon || tree.tags?.['species:en'] || 'Prunus sp.';
-    const height  = tree.tags?.height ? `<div class="popup-row"><span class="popup-label">Height:</span> ${tree.tags.height}m</div>` : '';
-
-    return `
-        <div class="popup-title">&#10047; ${escapeHtml(name)}</div>
-        <div class="popup-row"><span class="popup-label">Species:</span> <em>${escapeHtml(species)}</em></div>
-        ${height}
-        <div class="popup-row"><span class="popup-label">Coords:</span> ${tree.lat.toFixed(5)}, ${tree.lon.toFixed(5)}</div>
-        <div class="popup-row"><a href="https://www.openstreetmap.org/node/${tree.id}" target="_blank" style="font-size:11px">View on OSM &#8594;</a></div>
-    `;
-}
-
-// ─── Nearest Tree Calculation ─────────────────────────────────────────────────
+// ─── Results ──────────────────────────────────────────────────────────────────
 
 function findNearest(trees, userLat, userLon) {
-    let nearest  = null;
-    let minDist  = Infinity;
+    let nearest = null;
+    let minDist = Infinity;
 
     trees.forEach(tree => {
         const d = haversineMeters(userLat, userLon, tree.lat, tree.lon);
-        if (d < minDist) {
-            minDist  = d;
-            nearest  = tree;
-        }
+        if (d < minDist) { minDist = d; nearest = tree; }
     });
 
     nearest._distanceMeters = minDist;
@@ -338,36 +337,43 @@ function findNearest(trees, userLat, userLon) {
 }
 
 function showResult(tree, userLat, userLon) {
-    const name    = tree.tags?.name || tree.tags?.['name:en'] || '(unnamed tree #' + tree.id + ')';
-    const species = tree.tags?.species || tree.tags?.taxon || tree.tags?.['species:en'] || 'Prunus sp. (cherry)';
-    const dist    = tree._distanceMeters;
+    const name    = tree.tags?.name    || tree.tags?.['name:en']    || '(unnamed tree #' + tree.id + ')';
+    const species = tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || 'Prunus sp. (cherry)';
     const bearing = compassBearing(userLat, userLon, tree.lat, tree.lon);
 
     rName.textContent     = name;
     rSpecies.innerHTML    = `<em>${escapeHtml(species)}</em>`;
-    rDistance.textContent = formatDistance(dist);
+    rDistance.textContent = formatDistance(tree._distanceMeters);
     rCoords.textContent   = `${tree.lat.toFixed(5)}° N, ${tree.lon.toFixed(5)}° E`;
     rBearing.textContent  = `${Math.round(bearing)}° (${degreesToCardinal(bearing)})`;
 
-    const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${tree.lat},${tree.lon}`;
-    const dirLink = document.getElementById('directions-link');
-    dirLink.href = mapsUrl;
+    document.getElementById('directions-link').href =
+        `https://www.google.com/maps/dir/?api=1&destination=${tree.lat},${tree.lon}`;
     directionsArea.style.visibility = 'visible';
 
     noResults.classList.add('hidden');
     resultBox.classList.remove('hidden');
 
-    // Pan map to center between user and nearest tree
-    const bounds = L.latLngBounds([[userLat, userLon], [tree.lat, tree.lon]]);
-    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+    // Fit map to frame both user and nearest tree
+    map.fitBounds(
+        [[Math.min(userLon, tree.lon), Math.min(userLat, tree.lat)],
+         [Math.max(userLon, tree.lon), Math.max(userLat, tree.lat)]],
+        { padding: 60, maxZoom: 16 }
+    );
 
-    // Highlight the nearest tree marker by opening its popup
-    treeLayer.eachLayer(layer => {
-        const ll = layer.getLatLng();
-        if (Math.abs(ll.lat - tree.lat) < 0.00001 && Math.abs(ll.lng - tree.lon) < 0.00001) {
-            layer.openPopup();
-        }
-    });
+    // Open popup on the nearest tree
+    if (activePopup) activePopup.remove();
+    activePopup = new maplibregl.Popup({ closeButton: true, offset: 8 })
+        .setLngLat([tree.lon, tree.lat])
+        .setHTML(buildPopup({
+            id:      tree.id,
+            lat:     tree.lat,
+            lon:     tree.lon,
+            name:    tree.tags?.name    || tree.tags?.['name:en']    || '',
+            species: tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || '',
+            height:  tree.tags?.height  || '',
+        }))
+        .addTo(map);
 }
 
 function showNoResults() {
@@ -379,75 +385,45 @@ function showNoResults() {
 
 // ─── UI Helpers ───────────────────────────────────────────────────────────────
 
-function setStatus(msg) {
-    statusText.textContent = msg;
-}
+function setStatus(msg)  { statusText.textContent = msg; }
+function showProgress(v) { progressBar.classList.toggle('hidden', !v); }
+function setProgress(p)  { progressFill.style.width = p + '%'; }
 
-function showProgress(visible) {
-    if (visible) {
-        progressBar.classList.remove('hidden');
-    } else {
-        progressBar.classList.add('hidden');
-    }
-}
+// ─── Math ─────────────────────────────────────────────────────────────────────
 
-function setProgress(pct) {
-    progressFill.style.width = pct + '%';
-}
-
-// ─── Math Utilities ───────────────────────────────────────────────────────────
-
-/**
- * Haversine formula — returns distance in meters between two lat/lon pairs.
- */
 function haversineMeters(lat1, lon1, lat2, lon2) {
-    const R  = 6371000; // Earth radius in metres
+    const R  = 6371000;
     const φ1 = lat1 * Math.PI / 180;
     const φ2 = lat2 * Math.PI / 180;
     const Δφ = (lat2 - lat1) * Math.PI / 180;
     const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ / 2) ** 2 +
-              Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const a  = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
     return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/**
- * Returns the initial bearing (degrees, 0–360) from point 1 to point 2.
- */
 function compassBearing(lat1, lon1, lat2, lon2) {
     const φ1 = lat1 * Math.PI / 180;
     const φ2 = lat2 * Math.PI / 180;
     const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-    const y = Math.sin(Δλ) * Math.cos(φ2);
-    const x = Math.cos(φ1) * Math.sin(φ2) -
-              Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-
+    const y  = Math.sin(Δλ) * Math.cos(φ2);
+    const x  = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
 function degreesToCardinal(deg) {
-    const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
-                  'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+    const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
     return dirs[Math.round(deg / 22.5) % 16];
 }
 
 function formatDistance(meters) {
-    if (meters < 1000) {
-        return Math.round(meters) + ' m';
-    }
-    return (meters / 1000).toFixed(2) + ' km';
+    return meters < 1000 ? Math.round(meters) + ' m' : (meters / 1000).toFixed(2) + ' km';
 }
 
-// ─── Security Helper ──────────────────────────────────────────────────────────
+// ─── Security ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str) {
     if (!str) return '';
     return String(str)
-        .replace(/&/g,  '&amp;')
-        .replace(/</g,  '&lt;')
-        .replace(/>/g,  '&gt;')
-        .replace(/"/g,  '&quot;')
-        .replace(/'/g,  '&#039;');
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }

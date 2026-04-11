@@ -388,8 +388,6 @@ p:last-child {
     width: 100%;
     border: 3px ridge #8b0000;
     background: #f5f0e8;
-    /* Slight vintage tint via CSS filter */
-    filter: saturate(0.9) sepia(0.08);
 }
 
 #map-legend {
@@ -510,28 +508,8 @@ p:last-child {
 }
 
 /* ----------------------------------------------------------------
-   LEAFLET CUSTOM MARKERS
+   MAPLIBRE CUSTOM MARKERS
 ---------------------------------------------------------------- */
-.sakura-marker-container {
-    background: transparent;
-    border: none;
-}
-.sakura-dot {
-    width: 10px;
-    height: 10px;
-    background: #ff69b4;
-    border: 2px solid #c2185b;
-    border-radius: 50%;
-    box-shadow: 0 0 5px rgba(255, 105, 180, 0.7);
-    transition: transform 0.15s;
-}
-.sakura-dot:hover {
-    transform: scale(1.4);
-}
-.user-marker-container {
-    background: transparent;
-    border: none;
-}
 .user-dot {
     width: 14px;
     height: 14px;
@@ -540,29 +518,40 @@ p:last-child {
     border-radius: 50%;
     box-shadow: 0 0 8px rgba(74, 144, 217, 0.8);
     animation: pulse-user 2s ease-in-out infinite;
+    cursor: pointer;
 }
 @keyframes pulse-user {
     0%, 100% { box-shadow: 0 0 8px rgba(74, 144, 217, 0.8); }
-    50% { box-shadow: 0 0 16px rgba(74, 144, 217, 1); }
+    50%       { box-shadow: 0 0 16px rgba(74, 144, 217, 1); }
 }
 
 /* ----------------------------------------------------------------
-   LEAFLET POPUP OVERRIDES
+   MAPLIBRE POPUP OVERRIDES
 ---------------------------------------------------------------- */
-.leaflet-popup-content-wrapper {
+.maplibregl-popup-content {
     background: #fffaf0;
     border: 2px ridge #8b0000;
     border-radius: 0;
     box-shadow: 3px 3px 0 rgba(0,0,0,0.3);
-}
-.leaflet-popup-tip {
-    background: #8b0000;
-}
-.leaflet-popup-content {
     font-family: 'Times New Roman', serif;
     font-size: 12px;
     color: #2a0a0a;
-    margin: 8px 10px;
+    padding: 8px 10px;
+}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+    border-top-color: #8b0000;
+}
+.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+    border-bottom-color: #8b0000;
+}
+.maplibregl-popup-close-button {
+    color: #8b0000;
+    font-size: 16px;
+    padding: 2px 6px;
 }
 .popup-title {
     font-family: 'Special Elite', serif;
