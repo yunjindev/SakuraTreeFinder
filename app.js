@@ -178,7 +178,7 @@ async function fetchFromINaturalist(lat, lon) {
         const json = await resp.json();
 
         return (json.results || [])
-            .filter(obs => obs.location && isCherryTaxon(obs.taxon))
+            .filter(obs => obs.location && isSakuraTaxon(obs.taxon))
             .map(normalizeINatObservation)
             .filter(t => !isNaN(t.lat) && !isNaN(t.lon));
 
@@ -189,28 +189,63 @@ async function fetchFromINaturalist(lat, lon) {
     }
 }
 
-/**
- * Returns true if the iNaturalist taxon is a cherry blossom species.
- * Rejects plums, peaches, apricots, almonds (other Prunus species).
- */
-function isCherryTaxon(taxon) {
+// ── Sakura species whitelist ──────────────────────────────────────────────────
+// Only ornamental Japanese cherry blossom species. Explicitly excludes:
+// bird cherry, black cherry, chokecherry, fire cherry, cherry-plum,
+// wild/sweet cherry, plums, peaches, apricots, almonds.
+
+const SAKURA_SCIENTIFIC = [
+    'prunus serrulata',
+    'prunus yedoensis',
+    'prunus × yedoensis',
+    'prunus x yedoensis',
+    'prunus subhirtella',
+    'prunus pendula',
+    'prunus sargentii',
+    'prunus speciosa',
+    'prunus campanulata',
+    'prunus jamasakura',
+    'prunus incisa',
+    'prunus nipponica',
+    'prunus itosakura',
+    'prunus verecunda',
+    'prunus leveilleana',
+    'prunus maximowiczii',
+    'prunus × sieboldii',
+    'prunus x sieboldii',
+    'prunus × kanzakura',
+    'prunus x kanzakura',
+    'cerasus serrulata',   // alternate classification used in some databases
+];
+
+const SAKURA_COMMON = [
+    'sakura',
+    'cherry blossom',
+    'flowering cherry',
+    'japanese cherry',
+    'yoshino cherry',
+    'higan cherry',
+    'weeping cherry',
+    'sargent cherry',
+    "sargent's cherry",
+    'oshima cherry',
+    'hill cherry',
+    'taiwan cherry',
+    'formosan cherry',
+    'fuji cherry',
+    'ornamental cherry',
+    'japanese flowering cherry',
+];
+
+function isSakuraTaxon(taxon) {
     if (!taxon) return false;
-    const common = (taxon.preferred_common_name || '').toLowerCase();
-    const name   = (taxon.name || '').toLowerCase();
+    const sci    = (taxon.name || '').toLowerCase().trim();
+    const common = (taxon.preferred_common_name || '').toLowerCase().trim();
 
-    // Common name contains "cherry" or "sakura"
-    if (common.includes('cherry') || common.includes('sakura')) return true;
+    if (SAKURA_SCIENTIFIC.some(s => sci.startsWith(s))) return true;
+    if (SAKURA_COMMON.some(c => common.includes(c)))    return true;
 
-    // Scientific name matches known cherry species
-    const cherryPrefixes = [
-        'prunus serrulata', 'prunus yedoensis', 'prunus × yedoensis',
-        'prunus x yedoensis', 'prunus subhirtella', 'prunus pendula',
-        'prunus sargentii', 'prunus speciosa', 'prunus jamasakura',
-        'prunus campanulata', 'prunus avium', 'prunus cerasus',
-        'prunus mahaleb', 'prunus incisa', 'prunus rufa', 'prunus nipponica',
-        'prunus maximowiczii', 'prunus verecunda', 'prunus itosakura',
-    ];
-    return cherryPrefixes.some(p => name.startsWith(p));
+    return false;
 }
 
 function normalizeINatObservation(obs) {
@@ -229,14 +264,14 @@ function normalizeINatObservation(obs) {
 // ── Overpass (OSM) ────────────────────────────────────────────────────────────
 
 async function fetchFromOverpass(lat, lon) {
-    // Broad query — just look for any Prunus tree, any species tagging style
+    // Query for known sakura species only — no broad Prunus genus match
+    const SAKURA_REGEX = 'Prunus serrulata|Prunus yedoensis|Prunus subhirtella|Prunus pendula|Prunus sargentii|Prunus speciosa|Prunus campanulata|Prunus jamasakura|Prunus incisa|Prunus nipponica|Prunus itosakura';
     const query = `
 [out:json][timeout:25];
 (
-  node["natural"="tree"]["species"~"Prunus",i](around:${SEARCH_RADIUS_M},${lat},${lon});
-  node["natural"="tree"]["taxon"~"Prunus",i](around:${SEARCH_RADIUS_M},${lat},${lon});
-  node["natural"="tree"]["genus"="Prunus"](around:${SEARCH_RADIUS_M},${lat},${lon});
-  node["natural"="tree"]["species:en"~"cherry",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["species"~"${SAKURA_REGEX}",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["taxon"~"${SAKURA_REGEX}",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["species:en"~"cherry blossom|japanese cherry|yoshino cherry|flowering cherry|higan cherry|weeping cherry|sakura",i](around:${SEARCH_RADIUS_M},${lat},${lon});
   node["natural"="tree"]["name"~"sakura|cherry blossom",i](around:${SEARCH_RADIUS_M},${lat},${lon});
 );
 out body;
@@ -266,7 +301,9 @@ out body;
             if (!resp.ok) throw new Error(`Overpass HTTP ${resp.status}`);
 
             const json = await resp.json();
-            return (json.elements || []).map(normalizeOverpassElement);
+            return (json.elements || [])
+                .map(normalizeOverpassElement)
+                .filter(t => isSakuraByTags(t));
 
         } catch (err) {
             clearTimeout(timeoutId);
@@ -289,6 +326,15 @@ function normalizeOverpassElement(el) {
         source:     'OpenStreetMap',
         source_url: 'https://www.openstreetmap.org/node/' + el.id,
     };
+}
+
+// Secondary filter for Overpass results — run species/name tags through the whitelist
+function isSakuraByTags(tree) {
+    const sci    = (tree.species || '').toLowerCase();
+    const common = (tree.name    || '').toLowerCase();
+    if (SAKURA_SCIENTIFIC.some(s => sci.startsWith(s)))  return true;
+    if (SAKURA_COMMON.some(c => common.includes(c)))      return true;
+    return false;
 }
 
 // ── Deduplication ─────────────────────────────────────────────────────────────

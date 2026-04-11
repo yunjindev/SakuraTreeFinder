@@ -439,6 +439,9 @@ p:last-child {
     width: 100%;
     border: 3px ridge #8b0000;
     background: #f5f0e8;
+    overflow: hidden;
+    position: relative;
+    isolation: isolate;
 }
 
 #map-legend {
