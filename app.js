@@ -1,35 +1,45 @@
 /**
  * Sakura Tree Finder :: app.js
  *
- * Map: MapLibre GL JS (WebGL canvas — no tile-grid desync issues)
- * Tiles: OpenFreeMap liberty style (free, no API key)
- * Trees: Overpass API queried live on geolocation
+ * Tree data sources (queried in parallel, results merged):
+ *   1. iNaturalist API  — citizen science observations, global coverage,
+ *                         includes cultivated trees via quality_grade=any
+ *   2. Overpass API     — OSM individual tree nodes, good in DC/Tokyo/Europe
+ *
+ * Map: MapLibre GL JS (WebGL canvas)
+ * Tiles: OpenFreeMap liberty style
+ * Geocoding: Nominatim
  */
 
 'use strict';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const OVERPASS_URL         = 'https://overpass-api.de/api/interpreter';
-const OVERPASS_TIMEOUT_MS  = 20000;
-const OVERPASS_MAX_RETRIES = 3;
-const SEARCH_RADIUS        = 50000;
+const OVERPASS_URL       = 'https://overpass-api.de/api/interpreter';
+const INAT_URL           = 'https://api.inaturalist.org/v1/observations';
+const SEARCH_RADIUS_M    = 50000;   // metres  (Overpass)
+const SEARCH_RADIUS_KM   = 50;      // km      (iNaturalist)
+const API_TIMEOUT_MS     = 20000;
+const OVERPASS_RETRIES   = 3;
+const DEDUP_THRESHOLD_M  = 30;      // treat two results within 30m as same tree
 
-// MapLibre uses [lon, lat] order (GeoJSON standard)
-const DEFAULT_CENTER = [139.6503, 35.6762]; // Tokyo
+// iNaturalist taxon_id 47351 = genus Prunus (all species, all descendants)
+const INAT_PRUNUS_TAXON  = 47351;
+
+const DEFAULT_CENTER = [139.6503, 35.6762]; // Tokyo [lon, lat]
 const DEFAULT_ZOOM   = 5;
 
 const STATUS = {
     IDLE:        'Awaiting location request...',
     LOCATING:    'Acquiring GPS coordinates...',
-    FETCHING:    'Querying Overpass API for Sakura trees...',
+    FETCHING:    'Searching for Sakura trees nearby...',
     MAPPING:     'Rendering trees on map...',
     DONE:        'Search complete. Results displayed below.',
-    NO_RESULT:   'No trees found within 50km. Try a larger area.',
+    NO_RESULT:   'No trees found within 50km. Try a different area.',
     ERR_DENIED:  'Location permission denied. See instructions below.',
     ERR_UNAVAIL: 'Location unavailable. Check your device GPS and try again.',
     ERR_TIMEOUT: 'Location request timed out. Try again.',
-    ERR_API:     'Overpass API unavailable after 3 attempts. Try again later.',
+    ERR_API:     'Could not fetch tree data. Please try again.',
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -52,6 +62,9 @@ const noResults      = document.getElementById('no-results');
 const directionsArea = document.getElementById('directions-area');
 const treeCountEl    = document.getElementById('tree-count');
 const geoErrorHelp   = document.getElementById('geo-error-help');
+const searchInput    = document.getElementById('search-input');
+const searchBtn      = document.getElementById('search-btn');
+const searchError    = document.getElementById('search-error');
 
 const rName     = document.getElementById('r-name');
 const rSpecies  = document.getElementById('r-species');
@@ -65,6 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
     initMap();
     locateBtn.addEventListener('click', onLocateClick);
     resetBtn.addEventListener('click', onReset);
+    searchBtn.addEventListener('click', onSearchSubmit);
+    searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') onSearchSubmit(); });
 });
 
 // ─── Map ──────────────────────────────────────────────────────────────────────
@@ -75,19 +90,17 @@ function initMap() {
         style: 'https://tiles.openfreemap.org/styles/liberty',
         center: DEFAULT_CENTER,
         zoom: DEFAULT_ZOOM,
-        attributionControl: true,
+        attributionControl: false,
     });
 
     map.on('load', () => {
         mapReady = true;
 
-        // GeoJSON source — all tree dots live here
         map.addSource('trees', {
             type: 'geojson',
             data: { type: 'FeatureCollection', features: [] }
         });
 
-        // Pink circle layer — rendered in WebGL, handles thousands of points
         map.addLayer({
             id: 'tree-circles',
             type: 'circle',
@@ -101,7 +114,6 @@ function initMap() {
             }
         });
 
-        // Popup on tree click
         map.on('click', 'tree-circles', e => {
             const props  = e.features[0].properties;
             const coords = e.features[0].geometry.coordinates.slice();
@@ -117,6 +129,181 @@ function initMap() {
     });
 }
 
+// ─── Tree Fetching — Primary: iNaturalist, Secondary: Overpass ────────────────
+
+async function fetchTrees(lat, lon) {
+    setStatus('Searching iNaturalist and OpenStreetMap...');
+
+    const [inatResult, osmResult] = await Promise.allSettled([
+        fetchFromINaturalist(lat, lon),
+        fetchFromOverpass(lat, lon),
+    ]);
+
+    const trees = [];
+    if (inatResult.status === 'fulfilled') trees.push(...inatResult.value);
+    if (osmResult.status  === 'fulfilled') trees.push(...osmResult.value);
+
+    // Both failed — surface an error
+    if (trees.length === 0 && inatResult.status === 'rejected' && osmResult.status === 'rejected') {
+        console.error('iNaturalist error:', inatResult.reason);
+        console.error('Overpass error:',    osmResult.reason);
+        throw new Error('All data sources failed');
+    }
+
+    return deduplicateByProximity(trees, DEDUP_THRESHOLD_M);
+}
+
+// ── iNaturalist ───────────────────────────────────────────────────────────────
+
+async function fetchFromINaturalist(lat, lon) {
+    const params = new URLSearchParams({
+        taxon_id:      INAT_PRUNUS_TAXON,
+        lat:           lat,
+        lng:           lon,              // iNaturalist uses "lng" not "lon"
+        radius:        SEARCH_RADIUS_KM,
+        per_page:      200,
+        quality_grade: 'any',            // crucial: includes cultivated/captive trees
+        geo:           'true',
+        order_by:      'id',
+    });
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+    try {
+        const resp = await fetch(`${INAT_URL}?${params}`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!resp.ok) throw new Error(`iNaturalist HTTP ${resp.status}`);
+
+        const json = await resp.json();
+
+        return (json.results || [])
+            .filter(obs => obs.location && isCherryTaxon(obs.taxon))
+            .map(normalizeINatObservation)
+            .filter(t => !isNaN(t.lat) && !isNaN(t.lon));
+
+    } catch (err) {
+        clearTimeout(timeoutId);
+        console.warn('iNaturalist fetch failed:', err.message);
+        throw err;
+    }
+}
+
+/**
+ * Returns true if the iNaturalist taxon is a cherry blossom species.
+ * Rejects plums, peaches, apricots, almonds (other Prunus species).
+ */
+function isCherryTaxon(taxon) {
+    if (!taxon) return false;
+    const common = (taxon.preferred_common_name || '').toLowerCase();
+    const name   = (taxon.name || '').toLowerCase();
+
+    // Common name contains "cherry" or "sakura"
+    if (common.includes('cherry') || common.includes('sakura')) return true;
+
+    // Scientific name matches known cherry species
+    const cherryPrefixes = [
+        'prunus serrulata', 'prunus yedoensis', 'prunus × yedoensis',
+        'prunus x yedoensis', 'prunus subhirtella', 'prunus pendula',
+        'prunus sargentii', 'prunus speciosa', 'prunus jamasakura',
+        'prunus campanulata', 'prunus avium', 'prunus cerasus',
+        'prunus mahaleb', 'prunus incisa', 'prunus rufa', 'prunus nipponica',
+        'prunus maximowiczii', 'prunus verecunda', 'prunus itosakura',
+    ];
+    return cherryPrefixes.some(p => name.startsWith(p));
+}
+
+function normalizeINatObservation(obs) {
+    const [latStr, lonStr] = obs.location.split(',');
+    return {
+        id:         'inat_' + obs.id,
+        lat:        parseFloat(latStr),
+        lon:        parseFloat(lonStr),
+        name:       obs.taxon?.preferred_common_name || obs.taxon?.name || 'Cherry Blossom',
+        species:    obs.taxon?.name || 'Prunus sp.',
+        source:     'iNaturalist',
+        source_url: 'https://www.inaturalist.org/observations/' + obs.id,
+    };
+}
+
+// ── Overpass (OSM) ────────────────────────────────────────────────────────────
+
+async function fetchFromOverpass(lat, lon) {
+    // Broad query — just look for any Prunus tree, any species tagging style
+    const query = `
+[out:json][timeout:25];
+(
+  node["natural"="tree"]["species"~"Prunus",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["taxon"~"Prunus",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["genus"="Prunus"](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["species:en"~"cherry",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+  node["natural"="tree"]["name"~"sakura|cherry blossom",i](around:${SEARCH_RADIUS_M},${lat},${lon});
+);
+out body;
+    `.trim();
+
+    let lastError;
+
+    for (let attempt = 1; attempt <= OVERPASS_RETRIES; attempt++) {
+        if (attempt > 1) {
+            const delay = 2 ** (attempt - 2);
+            await sleep(delay * 1000);
+        }
+
+        const controller = new AbortController();
+        const timeoutId  = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+        try {
+            const resp = await fetch(OVERPASS_URL, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body:    'data=' + encodeURIComponent(query),
+                signal:  controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            if (resp.status >= 400 && resp.status < 500) throw new Error(`Overpass ${resp.status} not retrying`);
+            if (!resp.ok) throw new Error(`Overpass HTTP ${resp.status}`);
+
+            const json = await resp.json();
+            return (json.elements || []).map(normalizeOverpassElement);
+
+        } catch (err) {
+            clearTimeout(timeoutId);
+            lastError = err;
+            if (err.message.includes('not retrying')) throw err;
+            console.warn(`Overpass attempt ${attempt} failed:`, err.message);
+        }
+    }
+
+    throw lastError;
+}
+
+function normalizeOverpassElement(el) {
+    return {
+        id:         'osm_' + el.id,
+        lat:        el.lat,
+        lon:        el.lon,
+        name:       el.tags?.['name:en'] || el.tags?.name || el.tags?.['species:en'] || 'Cherry Blossom',
+        species:    el.tags?.species || el.tags?.taxon || el.tags?.['species:en'] || 'Prunus sp.',
+        source:     'OpenStreetMap',
+        source_url: 'https://www.openstreetmap.org/node/' + el.id,
+    };
+}
+
+// ── Deduplication ─────────────────────────────────────────────────────────────
+
+function deduplicateByProximity(trees, thresholdMeters) {
+    const kept = [];
+    for (const tree of trees) {
+        const isDup = kept.some(k => haversineMeters(k.lat, k.lon, tree.lat, tree.lon) < thresholdMeters);
+        if (!isDup) kept.push(tree);
+    }
+    return kept;
+}
+
+// ─── Map Rendering ────────────────────────────────────────────────────────────
+
 function renderTrees(trees) {
     const geojson = {
         type: 'FeatureCollection',
@@ -124,12 +311,13 @@ function renderTrees(trees) {
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [tree.lon, tree.lat] },
             properties: {
-                id:      tree.id,
-                lat:     tree.lat,
-                lon:     tree.lon,
-                name:    tree.tags?.name    || tree.tags?.['name:en']    || '',
-                species: tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || '',
-                height:  tree.tags?.height  || '',
+                id:         tree.id,
+                lat:        tree.lat,
+                lon:        tree.lon,
+                name:       tree.name,
+                species:    tree.species,
+                source:     tree.source,
+                source_url: tree.source_url,
             }
         }))
     };
@@ -152,20 +340,22 @@ function placeUserMarker(lat, lon) {
 }
 
 function buildPopup(props) {
-    const name    = props.name    || ('Cherry Blossom Tree #' + props.id);
+    const name    = props.name    || 'Cherry Blossom Tree';
     const species = props.species || 'Prunus sp.';
-    const lat     = typeof props.lat === 'number' ? props.lat : parseFloat(props.lat);
-    const lon     = typeof props.lon === 'number' ? props.lon : parseFloat(props.lon);
-    const height  = props.height
-        ? `<div class="popup-row"><span class="popup-label">Height:</span> ${escapeHtml(String(props.height))}m</div>`
+    const lat     = parseFloat(props.lat);
+    const lon     = parseFloat(props.lon);
+    const url     = props.source_url || '';
+    const source  = props.source     || '';
+
+    const sourceLink = url
+        ? `<div class="popup-row"><a href="${escapeHtml(url)}" target="_blank" style="font-size:11px">View on ${escapeHtml(source)} &#8594;</a></div>`
         : '';
 
     return `
         <div class="popup-title">&#10047; ${escapeHtml(name)}</div>
         <div class="popup-row"><span class="popup-label">Species:</span> <em>${escapeHtml(species)}</em></div>
-        ${height}
         <div class="popup-row"><span class="popup-label">Coords:</span> ${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
-        <div class="popup-row"><a href="https://www.openstreetmap.org/node/${props.id}" target="_blank" style="font-size:11px">View on OSM &#8594;</a></div>
+        ${sourceLink}
     `;
 }
 
@@ -212,10 +402,71 @@ function onReset() {
 async function onLocationSuccess(position) {
     const { latitude: lat, longitude: lon } = position.coords;
     userLatLng = { lat, lon };
+    await searchFromLocation(lat, lon);
+}
 
+function onLocationError(err) {
+    console.warn('Geolocation error:', err.code, err.message);
+    showProgress(false);
+    locateBtn.disabled = false;
+    locateBtn.classList.remove('hidden');
+
+    if (err.code === GeolocationPositionError.PERMISSION_DENIED) {
+        setStatus(STATUS.ERR_DENIED);
+        geoErrorHelp.classList.remove('hidden');
+    } else if (err.code === GeolocationPositionError.POSITION_UNAVAILABLE) {
+        setStatus(STATUS.ERR_UNAVAIL);
+    } else {
+        setStatus(STATUS.ERR_TIMEOUT);
+    }
+}
+
+async function onSearchSubmit() {
+    const query = searchInput.value.trim();
+    if (!query) return;
+
+    searchError.classList.add('hidden');
+    searchBtn.disabled = true;
+    showProgress(true);
+    setStatus(`Searching for "${query}"...`);
+
+    try {
+        const url  = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&email=hunterweisenbach@me.com`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const results = await resp.json();
+
+        if (!results.length) {
+            searchError.classList.remove('hidden');
+            showProgress(false);
+            setStatus(STATUS.IDLE);
+            searchBtn.disabled = false;
+            return;
+        }
+
+        const { lat, lon } = results[0];
+        userLatLng = { lat: parseFloat(lat), lon: parseFloat(lon) };
+
+        resultBox.classList.add('hidden');
+        noResults.classList.add('hidden');
+        if (activePopup) { activePopup.remove(); activePopup = null; }
+        if (mapReady) map.getSource('trees').setData({ type: 'FeatureCollection', features: [] });
+        treeCountEl.textContent = '0';
+
+        await searchFromLocation(userLatLng.lat, userLatLng.lon);
+
+    } catch (err) {
+        console.error('Geocoding error:', err);
+        searchError.classList.remove('hidden');
+        showProgress(false);
+        setStatus(STATUS.IDLE);
+    } finally {
+        searchBtn.disabled = false;
+    }
+}
+
+async function searchFromLocation(lat, lon) {
     placeUserMarker(lat, lon);
-    map.setCenter([lon, lat]);
-    map.setZoom(13);
+    map.flyTo({ center: [lon, lat], zoom: 13 });
 
     setStatus(STATUS.FETCHING);
     setProgress(30);
@@ -239,86 +490,11 @@ async function onLocationSuccess(position) {
         resetBtn.classList.remove('hidden');
 
     } catch (err) {
-        console.error('Overpass API error:', err);
+        console.error('fetchTrees error:', err);
         setStatus(STATUS.ERR_API);
         showProgress(false);
         resetBtn.classList.remove('hidden');
     }
-}
-
-function onLocationError(err) {
-    console.warn('Geolocation error:', err.code, err.message);
-    showProgress(false);
-    locateBtn.disabled = false;
-    locateBtn.classList.remove('hidden');
-
-    if (err.code === GeolocationPositionError.PERMISSION_DENIED) {
-        setStatus(STATUS.ERR_DENIED);
-        geoErrorHelp.classList.remove('hidden');
-    } else if (err.code === GeolocationPositionError.POSITION_UNAVAILABLE) {
-        setStatus(STATUS.ERR_UNAVAIL);
-    } else {
-        setStatus(STATUS.ERR_TIMEOUT);
-    }
-}
-
-// ─── Overpass API ─────────────────────────────────────────────────────────────
-
-async function fetchTrees(lat, lon) {
-    const query = `
-[out:json][timeout:25];
-(
-  node["natural"="tree"]["species"~"Prunus serrulata|Prunus × yedoensis|Prunus yedoensis|Prunus pendula|Prunus subhirtella|Prunus sargentii|Prunus speciosa|Prunus jamasakura",i](around:${SEARCH_RADIUS},${lat},${lon});
-  node["natural"="tree"]["taxon"~"Prunus serrulata|Prunus yedoensis|Prunus pendula|Prunus subhirtella|Prunus sargentii",i](around:${SEARCH_RADIUS},${lat},${lon});
-  node["natural"="tree"]["species:en"~"cherry blossom|japanese cherry|yoshino cherry|sakura",i](around:${SEARCH_RADIUS},${lat},${lon});
-  node["natural"="tree"]["name"~"sakura|cherry blossom|cerisier|kirschbaum",i](around:${SEARCH_RADIUS},${lat},${lon});
-);
-out body;
-    `.trim();
-
-    let lastError;
-
-    for (let attempt = 1; attempt <= OVERPASS_MAX_RETRIES; attempt++) {
-        if (attempt > 1) {
-            const delaySec = 2 ** (attempt - 2);
-            setStatus(`Overpass API busy. Retrying in ${delaySec}s... (attempt ${attempt}/${OVERPASS_MAX_RETRIES})`);
-            await sleep(delaySec * 1000);
-            setStatus(STATUS.FETCHING);
-        }
-
-        const controller = new AbortController();
-        const timeoutId  = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
-
-        try {
-            const resp = await fetch(OVERPASS_URL, {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body:    'data=' + encodeURIComponent(query),
-                signal:  controller.signal,
-            });
-            clearTimeout(timeoutId);
-
-            if (resp.status >= 400 && resp.status < 500) {
-                throw new Error(`Overpass API returned ${resp.status}. Not retrying.`);
-            }
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-            const json = await resp.json();
-            return json.elements || [];
-
-        } catch (err) {
-            clearTimeout(timeoutId);
-            lastError = err;
-            if (err.message && err.message.includes('Not retrying')) throw err;
-            console.warn(`Overpass attempt ${attempt} failed:`, err.message);
-        }
-    }
-
-    throw lastError;
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ─── Results ──────────────────────────────────────────────────────────────────
@@ -337,12 +513,10 @@ function findNearest(trees, userLat, userLon) {
 }
 
 function showResult(tree, userLat, userLon) {
-    const name    = tree.tags?.name    || tree.tags?.['name:en']    || '(unnamed tree #' + tree.id + ')';
-    const species = tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || 'Prunus sp. (cherry)';
     const bearing = compassBearing(userLat, userLon, tree.lat, tree.lon);
 
-    rName.textContent     = name;
-    rSpecies.innerHTML    = `<em>${escapeHtml(species)}</em>`;
+    rName.textContent     = tree.name;
+    rSpecies.innerHTML    = `<em>${escapeHtml(tree.species)}</em>`;
     rDistance.textContent = formatDistance(tree._distanceMeters);
     rCoords.textContent   = `${tree.lat.toFixed(5)}° N, ${tree.lon.toFixed(5)}° E`;
     rBearing.textContent  = `${Math.round(bearing)}° (${degreesToCardinal(bearing)})`;
@@ -354,25 +528,16 @@ function showResult(tree, userLat, userLon) {
     noResults.classList.add('hidden');
     resultBox.classList.remove('hidden');
 
-    // Fit map to frame both user and nearest tree
     map.fitBounds(
         [[Math.min(userLon, tree.lon), Math.min(userLat, tree.lat)],
          [Math.max(userLon, tree.lon), Math.max(userLat, tree.lat)]],
         { padding: 60, maxZoom: 16 }
     );
 
-    // Open popup on the nearest tree
     if (activePopup) activePopup.remove();
     activePopup = new maplibregl.Popup({ closeButton: true, offset: 8 })
         .setLngLat([tree.lon, tree.lat])
-        .setHTML(buildPopup({
-            id:      tree.id,
-            lat:     tree.lat,
-            lon:     tree.lon,
-            name:    tree.tags?.name    || tree.tags?.['name:en']    || '',
-            species: tree.tags?.species || tree.tags?.['species:en'] || tree.tags?.taxon || '',
-            height:  tree.tags?.height  || '',
-        }))
+        .setHTML(buildPopup(tree))
         .addTo(map);
 }
 
@@ -417,6 +582,10 @@ function degreesToCardinal(deg) {
 
 function formatDistance(meters) {
     return meters < 1000 ? Math.round(meters) + ' m' : (meters / 1000).toFixed(2) + ' km';
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ─── Security ─────────────────────────────────────────────────────────────────

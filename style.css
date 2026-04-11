@@ -221,9 +221,12 @@ p:last-child {
     line-height: 1.2;
     text-shadow: 1px 1px 2px #000;
 }
+.retro-btn:visited {
+    color: #ffd9e8;
+}
 .retro-btn:hover {
     background: linear-gradient(180deg, #c2185b 0%, #ad1457 50%, #880e4f 100%);
-    color: #fff0f5;
+    color: #ffd9e8;
     text-decoration: none;
 }
 .retro-btn:active {
@@ -238,6 +241,54 @@ p:last-child {
 .retro-btn.small {
     font-size: 11px;
     padding: 5px 12px;
+}
+
+/* ----------------------------------------------------------------
+   DONATE BUTTON
+---------------------------------------------------------------- */
+.retro-btn.secondary {
+    font-size: 13px;
+    padding: 8px 18px;
+}
+
+/* ----------------------------------------------------------------
+   MAP SEARCH
+---------------------------------------------------------------- */
+#map-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 14px !important;
+    background: #fff5f8;
+    border-top: 1px solid #f0d0da;
+    border-bottom: 1px solid #f0d0da;
+}
+#search-input {
+    flex: 1;
+    min-width: 180px;
+    background: #fffaf0;
+    border: 2px inset #8b0000;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 13px;
+    color: #1a0a00;
+    padding: 6px 10px;
+    outline: none;
+}
+#search-input::placeholder {
+    color: #b08080;
+    font-style: italic;
+}
+#search-input:focus {
+    border-color: #c2185b;
+    background: #fff;
+}
+#search-error {
+    width: 100%;
+    font-size: 12px;
+    color: #8b4500;
+    font-style: italic;
+    padding-top: 2px;
 }
 
 /* ----------------------------------------------------------------

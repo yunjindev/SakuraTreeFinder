@@ -53,6 +53,9 @@
                         <button id="reset-btn" class="retro-btn secondary hidden">
                             &#8635; SEARCH AGAIN
                         </button>
+                        <a href="https://sites.google.com/view/pghsakuraproject-english/donate" target="_blank" class="retro-btn donate-btn">
+                            &#9829; Support the PGH Sakura Project &#9829;
+                        </a>
                     </div>
 
                     <div id="status-area">
@@ -119,6 +122,11 @@
                     <p class="map-desc">
                         Pink dots are Sakura trees. The blue dot is you. Zoom in to explore your area.
                     </p>
+                    <div id="map-search">
+                        <input type="text" id="search-input" placeholder="Search any city or place..." autocomplete="off" />
+                        <button id="search-btn" class="retro-btn small">&#9654; Search</button>
+                        <div id="search-error" class="hidden">Place not found. Try a different search.</div>
+                    </div>
                     <div id="map-frame">
                         <div id="map"></div>
                     </div>
